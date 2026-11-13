@@ -85,24 +85,83 @@ object LobbySessionManager {
     // Disbands and deletes the lobby
     fun disbandLobby(code: String) {
         val formattedCode = code.trim().uppercase(Locale.ROOT)
+        RealtimeDatabaseApi.clearCanvas(formattedCode)
         activeLobbies.update { current ->
             current - formattedCode
         }
     }
 
-    // Retrieves the current snapshot of a lobby by the code
+    // Retrieves the current snapshot of a lobby by code
     fun getLobby(code: String): Lobby? {
         val formattedCode = code.trim().uppercase(Locale.ROOT)
         return activeLobbies.value[formattedCode]
     }
 
-
-    // Updates lobby settings (theme and rounds per player)
-    fun updateSettings(code: String, theme: String, roundsPerPlayer: Int) {
+    // Updates lobby settings (theme, rounds per player, and time per round)
+    fun updateSettings(
+        code: String,
+        theme: String = "Animals",
+        roundsPerPlayer: Int = 3,
+        timePerRoundSeconds: Int = 45
+    ) {
         val formattedCode = code.trim().uppercase(Locale.ROOT)
         activeLobbies.update { current ->
             val existing = current[formattedCode] ?: return@update current
-            current + (formattedCode to existing.copy(theme = theme, roundsPerPlayer = roundsPerPlayer))
+            current + (formattedCode to existing.copy(
+                theme = theme,
+                roundsPerPlayer = roundsPerPlayer,
+                timePerRoundSeconds = timePerRoundSeconds
+            ))
+        }
+    }
+
+    // Awards points to guesser based on time remaining, and 1 point to the drawer
+    fun awardPoints(
+        code: String,
+        guesserName: String,
+        drawerName: String,
+        guesserPoints: Int
+    ) {
+        val formattedCode = code.trim().uppercase(Locale.ROOT)
+        activeLobbies.update { current ->
+            val existing = current[formattedCode] ?: return@update current
+            val updatedPlayers = existing.players.map { player ->
+                when {
+                    player.name.equals(guesserName, ignoreCase = true) -> {
+                        player.copy(score = player.score + guesserPoints)
+                    }
+                    player.name.equals(drawerName, ignoreCase = true) -> {
+                        player.copy(score = player.score + 1)
+                    }
+                    else -> player
+                }
+            }
+            current + (formattedCode to existing.copy(players = updatedPlayers))
+        }
+    }
+
+    //Increments currentRound for the lobby and resets the canvas for the new round
+    fun advanceToNextRound(code: String) {
+        val formattedCode = code.trim().uppercase(Locale.ROOT)
+        RealtimeDatabaseApi.clearCanvas(formattedCode)
+        activeLobbies.update { current ->
+            val existing = current[formattedCode] ?: return@update current
+            current + (formattedCode to existing.copy(currentRound = existing.currentRound + 1))
+        }
+    }
+
+    // Resets currentRound back to 1, resets all player scores to 0, and clears canvas for a new game
+    fun resetGame(code: String) {
+        val formattedCode = code.trim().uppercase(Locale.ROOT)
+        RealtimeDatabaseApi.clearCanvas(formattedCode)
+        activeLobbies.update { current ->
+            val existing = current[formattedCode] ?: return@update current
+            val resetPlayers = existing.players.map { it.copy(score = 0) }
+            current + (formattedCode to existing.copy(
+                players = resetPlayers,
+                currentRound = 1,
+                isGameStarted = false
+            ))
         }
     }
 

@@ -9,8 +9,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.pictionarymobileapp.data.LobbySessionManager
+import com.example.pictionarymobileapp.data.WordBankRepository
 import java.util.Locale
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LobbyScreen(
     code: String,
@@ -24,7 +26,7 @@ fun LobbyScreen(
 
     var hasBeenInLobby by remember { mutableStateOf(false) }
 
-    // Lobby deletion/disbanding
+    // Lobby deletion/disbanding listener
     LaunchedEffect(lobby) {
         if (lobby != null) {
             hasBeenInLobby = true
@@ -57,6 +59,15 @@ fun LobbyScreen(
 
     val currentUser = lobby.players.find { it.name.equals(username, ignoreCase = true) }
     val isHost = currentUser?.isHost ?: (lobby.hostUsername.equals(username, ignoreCase = true))
+
+    // Dropdown expansion states
+    var themeExpanded by remember { mutableStateOf(false) }
+    var roundsExpanded by remember { mutableStateOf(false) }
+    var timeExpanded by remember { mutableStateOf(false) }
+
+    val themeOptions = WordBankRepository.themes
+    val roundsOptions = (1..10).toList()
+    val timeOptions = listOf(15, 30, 45, 60, 75, 90)
 
     Column(
         modifier = Modifier
@@ -120,42 +131,122 @@ fun LobbyScreen(
             }
         }
 
-        // Settings (host interactive and non-host view only)
-        OutlinedTextField(
-            value = lobby.theme,
-            onValueChange = { newTheme ->
-                if (isHost) {
-                    LobbySessionManager.updateSettings(
-                        code = lobby.code,
-                        theme = newTheme,
-                        roundsPerPlayer = lobby.roundsPerPlayer
+        // Settings (host interactive, non-host view only)
+        // Game theme dropdown
+        ExposedDropdownMenuBox(
+            expanded = themeExpanded,
+            onExpandedChange = { if (isHost) themeExpanded = !themeExpanded }
+        ) {
+            OutlinedTextField(
+                value = lobby.theme,
+                onValueChange = {},
+                readOnly = true,
+                enabled = isHost,
+                label = { Text("Game Theme") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = themeExpanded) },
+                modifier = Modifier
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = themeExpanded && isHost,
+                onDismissRequest = { themeExpanded = false }
+            ) {
+                themeOptions.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            themeExpanded = false
+                            LobbySessionManager.updateSettings(
+                                code = lobby.code,
+                                theme = option,
+                                roundsPerPlayer = lobby.roundsPerPlayer,
+                                timePerRoundSeconds = lobby.timePerRoundSeconds
+                            )
+                        }
                     )
                 }
-            },
-            label = { Text("Game Theme") },
-            enabled = isHost,
-            modifier = Modifier.fillMaxWidth()
-        )
+            }
+        }
         Spacer(modifier = Modifier.height(8.dp))
-        OutlinedTextField(
-            value = lobby.roundsPerPlayer.toString(),
-            onValueChange = { newRoundsStr ->
-                if (isHost) {
-                    val newRounds = newRoundsStr.toIntOrNull() ?: lobby.roundsPerPlayer
-                    LobbySessionManager.updateSettings(
-                        code = lobby.code,
-                        theme = lobby.theme,
-                        roundsPerPlayer = newRounds
+
+        // Rounds per player dropdown (1 - 10)
+        ExposedDropdownMenuBox(
+            expanded = roundsExpanded,
+            onExpandedChange = { if (isHost) roundsExpanded = !roundsExpanded }
+        ) {
+            OutlinedTextField(
+                value = "${lobby.roundsPerPlayer}",
+                onValueChange = {},
+                readOnly = true,
+                enabled = isHost,
+                label = { Text("Rounds Per Player") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = roundsExpanded) },
+                modifier = Modifier
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = roundsExpanded && isHost,
+                onDismissRequest = { roundsExpanded = false }
+            ) {
+                roundsOptions.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("$option") },
+                        onClick = {
+                            roundsExpanded = false
+                            LobbySessionManager.updateSettings(
+                                code = lobby.code,
+                                theme = lobby.theme,
+                                roundsPerPlayer = option,
+                                timePerRoundSeconds = lobby.timePerRoundSeconds
+                            )
+                        }
                     )
                 }
-            },
-            label = { Text("Rounds Per Player") },
-            enabled = isHost,
-            modifier = Modifier.fillMaxWidth()
-        )
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Time per round (in seconds with options 15, 30, 45, 60, 75, 90)
+        ExposedDropdownMenuBox(
+            expanded = timeExpanded,
+            onExpandedChange = { if (isHost) timeExpanded = !timeExpanded }
+        ) {
+            OutlinedTextField(
+                value = "${lobby.timePerRoundSeconds} seconds",
+                onValueChange = {},
+                readOnly = true,
+                enabled = isHost,
+                label = { Text("Time Per Round (Seconds)") },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = timeExpanded) },
+                modifier = Modifier
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    .fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = timeExpanded && isHost,
+                onDismissRequest = { timeExpanded = false }
+            ) {
+                timeOptions.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text("$option seconds") },
+                        onClick = {
+                            timeExpanded = false
+                            LobbySessionManager.updateSettings(
+                                code = lobby.code,
+                                theme = lobby.theme,
+                                roundsPerPlayer = lobby.roundsPerPlayer,
+                                timePerRoundSeconds = option
+                            )
+                        }
+                    )
+                }
+            }
+        }
         Spacer(modifier = Modifier.height(24.dp))
 
-        // Start/disband buttons
+        // Start/Disband buttons
         if (isHost) {
             Button(
                 onClick = onStartGame,
