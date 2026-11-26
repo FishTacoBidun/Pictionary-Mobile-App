@@ -31,7 +31,7 @@ class LobbySessionTest {
         println("Player '${successResult.assignedUsername}' joined lobby $code")
         assertEquals(2, successResult.lobby.players.size)
 
-        // Total rounds test: 3 rounds per player * 2 players = 6 total rounds
+        // Total rounds test
         LobbySessionManager.updateSettings(code, theme = "Locations", roundsPerPlayer = 3, timePerRoundSeconds = 60)
         val updatedLobby = LobbySessionManager.getLobby(code)
 
@@ -81,11 +81,12 @@ class LobbySessionTest {
         val lobby = LobbySessionManager.createLobby("DrawerAlice")
         LobbySessionManager.joinLobby(lobby.code, "GuesserBob")
 
-        // Award GuesserBob 3 points for quick guess (>2/3 time left), DrawerAlice gets 1 point
+        // Award GuesserBob 3 points for quick guess and DrawerAlice gets 1 point
         LobbySessionManager.awardPoints(
             code = lobby.code,
-            guesserName = "GuesserBob",
-            drawerName = "DrawerAlice",
+            currentRound = 1,
+            guesserUid = "GuesserBob",
+            drawerUid = "DrawerAlice",
             guesserPoints = 3
         )
 

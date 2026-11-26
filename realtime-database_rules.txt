@@ -1,0 +1,18 @@
+{
+  "rules": {
+    "lobbies": {
+      "$lobbyCode": {
+        ".read": "auth != null",
+        ".write": "auth != null",
+        "drawing": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        },
+        "timer": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    }
+  }
+}

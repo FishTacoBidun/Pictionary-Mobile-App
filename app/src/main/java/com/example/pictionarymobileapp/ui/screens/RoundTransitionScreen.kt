@@ -1,49 +1,74 @@
 package com.example.pictionarymobileapp.ui.screens
 
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.pictionarymobileapp.data.Player
+import com.example.pictionarymobileapp.ui.theme.ThemeColors
+import com.example.pictionarymobileapp.ui.utils.getAvatarDrawableResId
+import kotlinx.coroutines.delay
 
 @Composable
 fun RoundTransitionScreen(
     players: List<Player> = emptyList(),
     currentRound: Int = 1,
     totalRounds: Int = 3,
+    isHost: Boolean = true,
+    localUsername: String = "",
     onNextRound: () -> Unit
 ) {
     val sortedPlayers = remember(players) {
-        if (players.isNotEmpty()) {
-            players.sortedByDescending { it.score }
+        players.sortedByDescending { it.score }
+    }
+
+    // Auto continue timer and single call guard
+    var countdown by remember(currentRound) { mutableIntStateOf(6) }
+    var hasCalledNextRound by remember(currentRound) { mutableStateOf(false) }
+
+    LaunchedEffect(countdown, currentRound) {
+        if (countdown > 0) {
+            delay(1000L)
+            countdown -= 1
         } else {
-            listOf(
-                Player(name = "Player 1", score = 5, isHost = true),
-                Player(name = "Player 2", score = 3),
-                Player(name = "Player 3", score = 1)
-            )
+            if (isHost && !hasCalledNextRound) {
+                hasCalledNextRound = true
+                onNextRound()
+            }
         }
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(ThemeColors.PageBackgroundOrange)
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Round $currentRound of $totalRounds Complete", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            text = "Round $currentRound of $totalRounds Complete",
+            style = MaterialTheme.typography.headlineMedium,
+            color = ThemeColors.TextWhite
+        )
         Spacer(modifier = Modifier.height(16.dp))
-        Text("Scoreboard", style = MaterialTheme.typography.titleLarge)
+        Text(
+            text = "Scoreboard",
+            style = MaterialTheme.typography.titleLarge,
+            color = ThemeColors.TextWhite
+        )
         Spacer(modifier = Modifier.height(8.dp))
 
         LazyColumn(
@@ -52,10 +77,13 @@ fun RoundTransitionScreen(
                 .fillMaxWidth()
         ) {
             itemsIndexed(sortedPlayers) { index, player ->
+                val isLocalPlayer = player.name.equals(localUsername, ignoreCase = true)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 4.dp)
+                        .padding(vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color.Black.copy(alpha = 0.25f)),
+                    border = BorderStroke(1.5.dp, ThemeColors.LightPurpleBorder)
                 ) {
                     Row(
                         modifier = Modifier
@@ -68,37 +96,40 @@ fun RoundTransitionScreen(
                             Text(
                                 text = "${index + 1}. ",
                                 style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                color = ThemeColors.TextWhite
                             )
                             Spacer(modifier = Modifier.width(8.dp))
 
-                            // Avatar circle placeholder
+                            // Avatar circle container
                             Box(
                                 modifier = Modifier
-                                    .size(36.dp)
+                                    .size(38.dp)
                                     .clip(CircleShape)
-                                    .background(Color.LightGray),
+                                    .background(Color.White)
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape),
                                 contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = player.name.take(1).uppercase(),
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = Color.DarkGray,
-                                    fontWeight = FontWeight.Bold
+                                Image(
+                                    painter = painterResource(id = getAvatarDrawableResId(player.avatarId)),
+                                    contentDescription = "Avatar ${player.avatarId}",
+                                    modifier = Modifier.size(26.dp)
                                 )
                             }
                             Spacer(modifier = Modifier.width(12.dp))
 
                             Text(
                                 text = player.name,
-                                style = MaterialTheme.typography.titleMedium
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = if (isLocalPlayer) FontWeight.Bold else FontWeight.Normal,
+                                color = ThemeColors.TextWhite
                             )
                         }
 
                         Text(
                             text = "${player.score} pts",
                             style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = Color.Yellow,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -107,11 +138,12 @@ fun RoundTransitionScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        Button(
-            onClick = onNextRound,
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) {
-            Text("Next Round (Auto-continue)")
-        }
+
+        Text(
+            text = "Next round starting in $countdown seconds...",
+            style = MaterialTheme.typography.bodyLarge,
+            color = ThemeColors.TextWhite,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.PictionaryMobileApp" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/orange_bg</item>
+
+        <!-- Splash screen settings -->
+        <item name="android:windowSplashScreenBackground">@color/orange_bg</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/orange_bg</item>
+    </style>
+
+</resources>

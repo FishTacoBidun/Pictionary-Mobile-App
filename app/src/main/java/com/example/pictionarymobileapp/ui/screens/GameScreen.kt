@@ -2,6 +2,7 @@ package com.example.pictionarymobileapp.ui.screens
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -22,7 +23,9 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.pictionarymobileapp.data.LobbySessionManager
 import com.example.pictionarymobileapp.data.Player
@@ -32,6 +35,9 @@ import com.example.pictionarymobileapp.data.SerializableStroke
 import com.example.pictionarymobileapp.data.WordBankRepository
 import com.example.pictionarymobileapp.data.toArgbInt
 import com.example.pictionarymobileapp.data.toComposeColor
+import com.example.pictionarymobileapp.ui.theme.ThemeColors
+import com.example.pictionarymobileapp.ui.utils.getAvatarDrawableResId
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -82,21 +88,52 @@ fun GameScreen(
     val allCanvasData by RealtimeDatabaseApi.allCanvasData.collectAsState()
     val remoteCanvasData = allCanvasData[sessionCode]
 
-    // View mode toggle for testing drawer vs guesser views
-    var isDrawer by remember { mutableStateOf(true) }
+    val allLobbies by LobbySessionManager.allLobbies.collectAsState()
+    val currentLobby = allLobbies[sessionCode]
+    val gameIndex = currentLobby?.gameIndex ?: 1
+
+    // Role is derived from whether current user UID matches currentDrawerUid
+    val currentUid = LobbySessionManager.getCurrentUid()
+    val isDrawer = remember(currentLobby, currentUid) {
+        if (currentLobby != null && currentLobby.currentDrawerUid.isNotBlank()) {
+            currentLobby.currentDrawerUid == currentUid
+        } else {
+            players.firstOrNull()?.id == currentUid || players.isEmpty()
+        }
+    }
+
+    // Name of the current drawer for intro screen and header
+    val currentDrawerName = remember(currentLobby, players) {
+        currentLobby?.players?.find { it.id == currentLobby.currentDrawerUid }?.name
+            ?: players.find { it.id == currentLobby?.currentDrawerUid }?.name
+            ?: players.firstOrNull()?.name
+            ?: "Drawer"
+    }
+
+    // Round intro screen state
+    var isShowingRoundIntro by remember(currentRound, gameIndex) { mutableStateOf(true) }
+    var revealDrawerName by remember(currentRound, gameIndex) { mutableStateOf(false) }
+
     var guessInput by remember { mutableStateOf("") }
 
-    // Word selection state (3 choices from theme word bank)
-    val wordChoices = remember(theme) {
+    // Word selection state
+    val wordChoices = remember(theme, currentRound, gameIndex) {
         WordBankRepository.getRandomWordChoices(theme, 3)
     }
     var selectedWord by remember { mutableStateOf<String?>(null) }
-    var isSelectingWord by remember { mutableStateOf(true) }
-    var selectionTimeLeft by remember { mutableIntStateOf(10) }
+    var isSelectingWord by remember(currentRound, gameIndex) { mutableStateOf(true) }
+    var selectionTimeLeft by remember(currentRound, gameIndex) { mutableIntStateOf(10) }
 
-    // 10-second word prompt selection timer
-    LaunchedEffect(isSelectingWord, selectionTimeLeft) {
-        if (isSelectingWord) {
+    // Cancel word selection timer on all clients when drawer picks word in Firestore
+    LaunchedEffect(currentLobby?.wordChosen, currentRound, gameIndex) {
+        if (currentLobby?.wordChosen == true) {
+            isSelectingWord = false
+        }
+    }
+
+    // Word prompt selection timer for the drawer
+    LaunchedEffect(isShowingRoundIntro, isSelectingWord, selectionTimeLeft) {
+        if (!isShowingRoundIntro && isSelectingWord && isDrawer) {
             if (selectionTimeLeft > 0) {
                 delay(1000L)
                 selectionTimeLeft -= 1
@@ -105,16 +142,20 @@ fun GameScreen(
                     selectedWord = wordChoices.first()
                 }
                 isSelectingWord = false
+                if (sessionCode.isNotBlank() && sessionCode != "DEFAULT") {
+                    LobbySessionManager.onWordChosen(sessionCode)
+                }
             }
         }
     }
 
-    // Guesser active guess map (3-sec timeout) and correct guessers set
+    // Guesser active guess map and correct guessers set
     val activeGuesses = remember { mutableStateMapOf<String, String>() }
     val correctGuessers = remember { mutableStateSetOf<String>() }
 
-    // Countdown timer state
-    var timeLeft by remember(timePerRoundSeconds) { mutableIntStateOf(timePerRoundSeconds) }
+    // Countdown timer state and round start guard
+    var timeLeft by remember(timePerRoundSeconds, currentRound, gameIndex) { mutableIntStateOf(timePerRoundSeconds) }
+    var hasRoundStarted by remember(currentRound, gameIndex) { mutableStateOf(false) }
 
     // Format timer as M:SS
     val formattedTime = remember(timeLeft) {
@@ -123,31 +164,103 @@ fun GameScreen(
         String.format(Locale.ROOT, "%d:%02d", mins, secs)
     }
 
-    // Active round timer loop (runs once word is selected)
-    LaunchedEffect(timeLeft, isSelectingWord) {
-        if (!isSelectingWord) {
+    // Set hasRoundStarted when intro and word selection complete
+    LaunchedEffect(isShowingRoundIntro, isSelectingWord) {
+        if (!isShowingRoundIntro && !isSelectingWord) {
+            hasRoundStarted = true
+        }
+    }
+
+    // Active round timer loop
+    LaunchedEffect(timeLeft, isShowingRoundIntro, isSelectingWord, hasRoundStarted) {
+        if (!isShowingRoundIntro && !isSelectingWord && hasRoundStarted) {
             if (timeLeft > 0) {
                 delay(1000L)
                 timeLeft -= 1
             } else {
-                if (currentRound >= totalRounds) {
-                    onGameOver()
-                } else {
-                    onRoundEnd()
+                val isHost = currentLobby?.hostUid == currentUid || currentLobby == null
+                if (isHost) {
+                    if (currentRound >= totalRounds) {
+                        LobbySessionManager.updateGameStatus(sessionCode, "finished")
+                        onGameOver()
+                    } else {
+                        LobbySessionManager.updateGameStatus(sessionCode, "round_transition")
+                        onRoundEnd()
+                    }
                 }
             }
         }
     }
 
-    // Interactive Canvas State
+    // Isolated round key per game session and round number
+    val roundDocKey = remember(gameIndex, currentRound) { "g${gameIndex}_r${currentRound}" }
+
+    // Listen to Firestore guesses for current round and perform drawer verification
+    LaunchedEffect(sessionCode, roundDocKey) {
+        correctGuessers.clear()
+        activeGuesses.clear()
+
+        if (sessionCode.isNotBlank() && sessionCode != "DEFAULT") {
+            val firestore = FirebaseFirestore.getInstance()
+            val guessesRef = firestore.collection("lobbies")
+                .document(sessionCode)
+                .collection("rounds")
+                .document(roundDocKey)
+                .collection("guesses")
+
+            guessesRef.addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null) return@addSnapshotListener
+
+                snapshot.documents.forEach { doc ->
+                    val playerUid = doc.getString("playerUid") ?: doc.id
+                    val playerName = doc.getString("playerName") ?: "Player"
+                    val guessText = doc.getString("guessText") ?: ""
+                    val isCorrect = doc.getBoolean("isCorrect") ?: false
+
+                    if (isCorrect) {
+                        correctGuessers.add(playerName)
+                        activeGuesses.remove(playerName)
+                    } else if (guessText.isNotBlank()) {
+                        // Check if correct on drawer device without flashing the answer
+                        if (isDrawer && selectedWord != null && WordBankRepository.isCorrectGuess(selectedWord, guessText)) {
+                            correctGuessers.add(playerName)
+                            activeGuesses.remove(playerName)
+
+                            val timeFraction = timeLeft.toFloat() / timePerRoundSeconds.toFloat()
+                            val guesserPoints = when {
+                                timeFraction > (2f / 3f) -> 3
+                                timeFraction > (1f / 3f) -> 2
+                                else -> 1
+                            }
+
+                            val drawerUid = currentLobby?.currentDrawerUid ?: currentUid
+
+                            LobbySessionManager.awardPoints(
+                                code = sessionCode,
+                                currentRound = currentRound,
+                                guesserUid = playerUid,
+                                drawerUid = drawerUid,
+                                guesserPoints = guesserPoints
+                            )
+                        } else {
+                            // Incorrect guess to show temporarily
+                            activeGuesses[playerName] = guessText
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Interactive canvas state
     val strokes = remember { mutableStateListOf<StrokePath>() }
     val actionHistory = remember { mutableStateListOf<CanvasAction>() }
     var currentPoints by remember { mutableStateOf<List<Offset>>(emptyList()) }
     var strokeWidth by remember { mutableFloatStateOf(12f) }
 
-    // Color State
+    // Color state
     var baseWheelColor by remember { mutableStateOf(Color.Red) }
-    var brightnessValue by remember { mutableFloatStateOf(0.5f) } // 0.0 = Black, 0.5 = Base Color, 1.0 = White
+    var brightnessValue by remember { mutableFloatStateOf(0.5f) }
     val selectedColor = remember(baseWheelColor, brightnessValue) {
         computeColor(baseWheelColor, brightnessValue)
     }
@@ -156,20 +269,31 @@ fun GameScreen(
     var isEraser by remember { mutableStateOf(false) }
     var isEyeDropper by remember { mutableStateOf(false) }
 
-    // Reset local canvas state & Realtime Database stream whenever a new round starts
-    LaunchedEffect(currentRound) {
+    // Reset local state, correct guessers, and canvas stream whenever a new round starts
+    LaunchedEffect(currentRound, gameIndex, sessionCode) {
+        timeLeft = timePerRoundSeconds
+        hasRoundStarted = false
+        isShowingRoundIntro = true
+        revealDrawerName = false
+        correctGuessers.clear()
+        activeGuesses.clear()
         strokes.clear()
         actionHistory.clear()
         currentPoints = emptyList()
         canvasBackgroundColor = Color.White
         isEraser = false
         isEyeDropper = false
+        selectedWord = null
         RealtimeDatabaseApi.clearCanvas(sessionCode)
         RealtimeDatabaseApi.updateDrawerStrokes(
             code = sessionCode,
             strokes = emptyList(),
             backgroundColorArgb = Color.White.toArgbInt()
         )
+        delay(2000L)
+        revealDrawerName = true
+        delay(1000L)
+        isShowingRoundIntro = false
     }
 
     // Helper to sync drawer canvas changes to Realtime Database API
@@ -181,118 +305,98 @@ fun GameScreen(
         )
     }
 
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
+            .background(ThemeColors.PageBackgroundOrange)
     ) {
-        // Top bar info (theme, timer, and LEAVE button)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("Theme: $theme", style = MaterialTheme.typography.bodyMedium)
-            Text(
-                text = if (isSelectingWord) "Selecting word ($selectionTimeLeft s)" else "Time: $formattedTime",
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (timeLeft <= 5 && !isSelectingWord) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-            )
-            Button(
-                onClick = onLeave,
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                modifier = Modifier.height(32.dp)
-            ) {
-                Text("LEAVE", style = MaterialTheme.typography.labelMedium)
-            }
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Players display area box
-        PlayersDisplayArea(
-            players = players,
-            localUsername = username,
-            isLocalDrawer = isDrawer,
-            activeGuesses = activeGuesses,
-            correctGuessers = correctGuessers
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // View toggle switch
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Center,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Switch(checked = isDrawer, onCheckedChange = { isDrawer = it })
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = if (isDrawer) "View: Drawer" else "View: Guesser",
-                style = MaterialTheme.typography.bodyMedium
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Interactive drawing canvas (synced live via Realtime Database API)
-        val activeCanvasBackground = if (isDrawer) canvasBackgroundColor else (remoteCanvasData?.backgroundColorArgb?.toComposeColor() ?: Color.White)
-
-        Box(
+        Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth()
-                .border(
-                    width = if (isEyeDropper) 3.dp else 2.dp,
-                    color = if (isEyeDropper) MaterialTheme.colorScheme.primary else Color.Gray,
-                    shape = RoundedCornerShape(8.dp)
-                )
-                .clip(RoundedCornerShape(8.dp))
-                .background(activeCanvasBackground)
+                .fillMaxSize()
+                .padding(16.dp)
         ) {
-            Canvas(
+            // Top bar info for theme, timer, and leave button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Theme: $theme", style = MaterialTheme.typography.bodyMedium, color = ThemeColors.TextWhite)
+                Text(
+                    text = when {
+                        isShowingRoundIntro -> "Preparing round..."
+                        isSelectingWord && isDrawer -> "Selecting word ($selectionTimeLeft s)"
+                        isSelectingWord && !isDrawer -> "Drawer is selecting a word..."
+                        else -> "Time: $formattedTime"
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (timeLeft <= 5 && !isSelectingWord && !isShowingRoundIntro) Color.Yellow else ThemeColors.TextWhite
+                )
+                Button(
+                    onClick = {
+                        LobbySessionManager.disbandLobby(sessionCode)
+                        onLeave()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.LeaveRed),
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Text("LEAVE", style = MaterialTheme.typography.labelMedium, color = ThemeColors.TextWhite)
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Players display area box
+            PlayersDisplayArea(
+                players = players,
+                localUsername = username,
+                currentDrawerUid = currentLobby?.currentDrawerUid ?: "",
+                activeGuesses = activeGuesses,
+                correctGuessers = correctGuessers
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Interactive drawing canvas
+            val activeCanvasBackground = if (isDrawer) canvasBackgroundColor else (remoteCanvasData?.backgroundColorArgb?.toComposeColor() ?: Color.White)
+
+            Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(isDrawer, selectedColor, strokeWidth, isEraser, isEyeDropper, canvasBackgroundColor) {
-                        if (!isDrawer) return@pointerInput
-                        awaitEachGesture {
-                            val down = awaitFirstDown()
-                            down.consume()
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .border(
+                        width = if (isEyeDropper) 3.dp else 2.dp,
+                        color = if (isEyeDropper) ThemeColors.PrimaryPurple else ThemeColors.LightPurpleBorder,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(activeCanvasBackground)
+            ) {
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(isDrawer, selectedColor, strokeWidth, isEraser, isEyeDropper, canvasBackgroundColor) {
+                            if (!isDrawer) return@pointerInput
+                            awaitEachGesture {
+                                val down = awaitFirstDown()
+                                down.consume()
 
-                            if (isEyeDropper) {
-                                // Eye Dropper mode
-                                val picked = pickColorAtPoint(
-                                    point = down.position,
-                                    strokes = strokes,
-                                    backgroundColor = canvasBackgroundColor
-                                )
-                                baseWheelColor = picked
-                                brightnessValue = 0.5f
-                                isEyeDropper = false
-                            } else {
-                                // Drawing mode, stream points live to Realtime Database
-                                val points = mutableListOf(down.position)
-                                currentPoints = points.toList()
-
-                                val strokeColor = if (isEraser) canvasBackgroundColor else selectedColor
-                                RealtimeDatabaseApi.updateActiveStroke(
-                                    code = sessionCode,
-                                    points = points.map { SerializablePoint.fromOffset(it) },
-                                    colorArgb = strokeColor.toArgbInt(),
-                                    strokeWidth = strokeWidth,
-                                    isEraser = isEraser
-                                )
-
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    val change = event.changes.firstOrNull { it.id == down.id }
-                                    if (change == null || !change.pressed) {
-                                        break
-                                    }
-                                    change.consume()
-                                    points.add(change.position)
+                                if (isEyeDropper) {
+                                    // Eye dropper mode
+                                    val picked = pickColorAtPoint(
+                                        point = down.position,
+                                        strokes = strokes,
+                                        backgroundColor = canvasBackgroundColor
+                                    )
+                                    baseWheelColor = picked
+                                    brightnessValue = 0.5f
+                                    isEyeDropper = false
+                                } else {
+                                    // Drawing mode to stream points live to Realtime Database
+                                    val points = mutableListOf(down.position)
                                     currentPoints = points.toList()
 
-                                    // Realtime streaming stroke update
+                                    val strokeColor = if (isEraser) canvasBackgroundColor else selectedColor
                                     RealtimeDatabaseApi.updateActiveStroke(
                                         code = sessionCode,
                                         points = points.map { SerializablePoint.fromOffset(it) },
@@ -300,318 +404,347 @@ fun GameScreen(
                                         strokeWidth = strokeWidth,
                                         isEraser = isEraser
                                     )
-                                }
 
-                                if (points.isNotEmpty()) {
-                                    val newStroke = StrokePath(
-                                        points = points.toList(),
-                                        color = strokeColor,
-                                        strokeWidth = strokeWidth,
-                                        isEraser = isEraser
-                                    )
-                                    strokes.add(newStroke)
-                                    actionHistory.add(CanvasAction.DrawStroke(newStroke))
-                                    syncDrawerStateToRealtimeDatabase()
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id }
+                                        if (change == null || !change.pressed) {
+                                            break
+                                        }
+                                        change.consume()
+                                        points.add(change.position)
+                                        currentPoints = points.toList()
+
+                                        // Realtime streaming stroke update
+                                        RealtimeDatabaseApi.updateActiveStroke(
+                                            code = sessionCode,
+                                            points = points.map { SerializablePoint.fromOffset(it) },
+                                            colorArgb = strokeColor.toArgbInt(),
+                                            strokeWidth = strokeWidth,
+                                            isEraser = isEraser
+                                        )
+                                    }
+
+                                    if (points.isNotEmpty()) {
+                                        val newStroke = StrokePath(
+                                            points = points.toList(),
+                                            color = strokeColor,
+                                            strokeWidth = strokeWidth,
+                                            isEraser = isEraser
+                                        )
+                                        strokes.add(newStroke)
+                                        actionHistory.add(CanvasAction.DrawStroke(newStroke))
+                                        syncDrawerStateToRealtimeDatabase()
+                                    }
+                                    currentPoints = emptyList()
                                 }
-                                currentPoints = emptyList()
                             }
                         }
-                    }
-            ) {
-                // Background fill
-                drawRect(activeCanvasBackground)
-
-                fun renderStroke(
-                    pts: List<Offset>,
-                    drawColor: Color,
-                    width: Float,
-                    eraser: Boolean
                 ) {
-                    if (pts.isEmpty()) return
-                    val finalColor = if (eraser) activeCanvasBackground else drawColor
+                    // Background fill
+                    drawRect(activeCanvasBackground)
 
-                    if (pts.size == 1) {
-                        drawCircle(
-                            color = finalColor,
-                            radius = width / 2f,
-                            center = pts.first()
-                        )
-                    } else {
-                        val path = Path().apply {
-                            moveTo(pts.first().x, pts.first().y)
-                            for (i in 1 until pts.size) {
-                                lineTo(pts[i].x, pts[i].y)
-                            }
-                        }
-                        drawPath(
-                            path = path,
-                            color = finalColor,
-                            style = Stroke(
-                                width = width,
-                                cap = StrokeCap.Round,
-                                join = StrokeJoin.Round
+                    fun renderStroke(
+                        pts: List<Offset>,
+                        drawColor: Color,
+                        width: Float,
+                        eraser: Boolean
+                    ) {
+                        if (pts.isEmpty()) return
+                        val finalColor = if (eraser) activeCanvasBackground else drawColor
+
+                        if (pts.size == 1) {
+                            drawCircle(
+                                color = finalColor,
+                                radius = width / 2f,
+                                center = pts.first()
                             )
-                        )
-                    }
-                }
-
-                if (isDrawer) {
-                    // Drawer view, render local strokes and active drawing stroke
-                    for (stroke in strokes) {
-                        renderStroke(
-                            pts = stroke.points,
-                            drawColor = stroke.color,
-                            width = stroke.strokeWidth,
-                            eraser = stroke.isEraser
-                        )
-                    }
-                    if (currentPoints.isNotEmpty()) {
-                        renderStroke(
-                            pts = currentPoints,
-                            drawColor = if (isEraser) canvasBackgroundColor else selectedColor,
-                            width = strokeWidth,
-                            eraser = isEraser
-                        )
-                    }
-                } else {
-                    // Guesser view, stream live from Realtime Database API
-                    val remoteStrokes = remoteCanvasData?.strokes ?: emptyList()
-                    for (stroke in remoteStrokes) {
-                        renderStroke(
-                            pts = stroke.points.map { it.toOffset() },
-                            drawColor = stroke.colorArgb.toComposeColor(),
-                            width = stroke.strokeWidth,
-                            eraser = stroke.isEraser
-                        )
-                    }
-                    val activePts = remoteCanvasData?.activeStrokePoints
-                    if (!activePts.isNullOrEmpty()) {
-                        renderStroke(
-                            pts = activePts.map { it.toOffset() },
-                            drawColor = (remoteCanvasData?.activeStrokeColorArgb ?: 0xFF000000.toInt()).toComposeColor(),
-                            width = remoteCanvasData?.activeStrokeWidth ?: 12f,
-                            eraser = remoteCanvasData?.activeStrokeIsEraser ?: false
-                        )
-                    }
-                }
-            }
-
-            if (isEyeDropper) {
-                Surface(
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    shape = RoundedCornerShape(bottomEnd = 8.dp),
-                    modifier = Modifier.align(Alignment.TopStart)
-                ) {
-                    Text(
-                        text = "Click anywhere on canvas to pick color",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Drawer controls/guesser view
-        if (isDrawer) {
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Top row (stroke Size, color wheel + hue slider, and prompt/word to draw)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Stroke size vertical bar
-                    VerticalStrokeSlider(
-                        strokeWidth = strokeWidth,
-                        onStrokeWidthChange = { strokeWidth = it }
-                    )
-
-                    // Color wheel with hue slider and current color display
-                    RgbColorPickerWithSlider(
-                        baseColor = baseWheelColor,
-                        selectedColor = if (isEraser) canvasBackgroundColor else selectedColor,
-                        brightnessValue = brightnessValue,
-                        onBaseColorSelected = { color ->
-                            baseWheelColor = color
-                            isEraser = false
-                            isEyeDropper = false
-                        },
-                        onBrightnessChanged = { value ->
-                            brightnessValue = value
-                            isEraser = false
-                            isEyeDropper = false
-                        }
-                    )
-
-                    // Word to draw
-                    Column(
-                        horizontalAlignment = Alignment.Start,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Word to draw:",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = selectedWord?.uppercase(Locale.ROOT) ?: "CHOOSING...",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-
-                // Bottom tools row (eraser, fill, eye dropper, undo, start over)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Eraser
-                    Button(
-                        onClick = {
-                            isEraser = !isEraser
-                            isEyeDropper = false
-                        },
-                        colors = if (isEraser) {
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                         } else {
-                            ButtonDefaults.outlinedButtonColors()
-                        },
-                        border = if (!isEraser) BorderStroke(1.dp, MaterialTheme.colorScheme.outline) else null,
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text(
-                            text = if (isEraser) "Eraser ON" else "Eraser",
-                            style = MaterialTheme.typography.labelSmall
-                        )
-                    }
-
-                    // Fill
-                    OutlinedButton(
-                        onClick = {
-                            actionHistory.add(
-                                CanvasAction.FillCanvas(
-                                    previousBackgroundColor = canvasBackgroundColor,
-                                    previousStrokes = strokes.toList(),
-                                    newBackgroundColor = selectedColor
+                            val path = Path().apply {
+                                moveTo(pts.first().x, pts.first().y)
+                                for (i in 1 until pts.size) {
+                                    lineTo(pts[i].x, pts[i].y)
+                                }
+                            }
+                            drawPath(
+                                path = path,
+                                color = finalColor,
+                                style = Stroke(
+                                    width = width,
+                                    cap = StrokeCap.Round,
+                                    join = StrokeJoin.Round
                                 )
                             )
-                            canvasBackgroundColor = selectedColor
-                            strokes.clear()
-                            isEraser = false
-                            isEyeDropper = false
-                            syncDrawerStateToRealtimeDatabase()
-                        },
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text("Fill", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
 
-                    // Eye Dropper
-                    Button(
-                        onClick = {
-                            isEyeDropper = !isEyeDropper
-                            isEraser = false
-                        },
-                        colors = if (isEyeDropper) {
-                            ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        } else {
-                            ButtonDefaults.outlinedButtonColors()
-                        },
-                        border = if (!isEyeDropper) BorderStroke(1.dp, MaterialTheme.colorScheme.outline) else null,
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(34.dp)
+                    if (isDrawer) {
+                        // Drawer view to render local strokes and active drawing stroke
+                        for (stroke in strokes) {
+                            renderStroke(
+                                pts = stroke.points,
+                                drawColor = stroke.color,
+                                width = stroke.strokeWidth,
+                                eraser = stroke.isEraser
+                            )
+                        }
+                        if (currentPoints.isNotEmpty()) {
+                            renderStroke(
+                                pts = currentPoints,
+                                drawColor = if (isEraser) canvasBackgroundColor else selectedColor,
+                                width = strokeWidth,
+                                eraser = isEraser
+                            )
+                        }
+                    } else {
+                        // Guesser view to stream live from Realtime Database API
+                        val remoteStrokes = remoteCanvasData?.strokes ?: emptyList()
+                        for (stroke in remoteStrokes) {
+                            renderStroke(
+                                pts = stroke.points.map { it.toOffset() },
+                                drawColor = stroke.colorArgb.toComposeColor(),
+                                width = stroke.strokeWidth,
+                                eraser = stroke.isEraser
+                            )
+                        }
+                        val activePts = remoteCanvasData?.activeStrokePoints
+                        if (!activePts.isNullOrEmpty()) {
+                            renderStroke(
+                                pts = activePts.map { it.toOffset() },
+                                drawColor = (remoteCanvasData?.activeStrokeColorArgb ?: 0xFF000000.toInt()).toComposeColor(),
+                                width = remoteCanvasData?.activeStrokeWidth ?: 12f,
+                                eraser = remoteCanvasData?.activeStrokeIsEraser ?: false
+                            )
+                        }
+                    }
+                }
+
+                if (isEyeDropper) {
+                    Surface(
+                        color = ThemeColors.PrimaryPurple,
+                        shape = RoundedCornerShape(bottomEnd = 8.dp),
+                        modifier = Modifier.align(Alignment.TopStart)
                     ) {
                         Text(
-                            text = if (isEyeDropper) "Picker ON" else "Eye Dropper",
-                            style = MaterialTheme.typography.labelSmall
+                            text = "Click anywhere on canvas to pick color",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = ThemeColors.TextWhite,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                         )
                     }
+                }
+            }
 
-                    // Undo
-                    OutlinedButton(
-                        onClick = {
-                            if (actionHistory.isNotEmpty()) {
-                                when (val lastAction = actionHistory.removeAt(actionHistory.lastIndex)) {
-                                    is CanvasAction.DrawStroke -> {
-                                        if (strokes.isNotEmpty()) {
-                                            strokes.removeAt(strokes.lastIndex)
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Drawer controls or guesser view
+            if (isDrawer) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // Top row stroke size, color wheel, hue value slider, and word to draw
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Stroke size vertical bar
+                        VerticalStrokeSlider(
+                            strokeWidth = strokeWidth,
+                            onStrokeWidthChange = { strokeWidth = it }
+                        )
+
+                        // Color wheel with hue value slider and color rect below
+                        RgbColorPickerWithSlider(
+                            baseColor = baseWheelColor,
+                            selectedColor = if (isEraser) canvasBackgroundColor else selectedColor,
+                            brightnessValue = brightnessValue,
+                            onBaseColorSelected = { color ->
+                                baseWheelColor = color
+                                isEraser = false
+                                isEyeDropper = false
+                            },
+                            onBrightnessChanged = { value ->
+                                brightnessValue = value
+                                isEraser = false
+                                isEyeDropper = false
+                            }
+                        )
+
+                        // Word info
+                        Column(
+                            horizontalAlignment = Alignment.Start,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text(
+                                text = "Word to draw:",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = ThemeColors.TextWhite
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = selectedWord?.uppercase(Locale.ROOT) ?: "CHOOSING...",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = Color.Yellow,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    // Bottom tools row for eraser, fill, eye dropper, undo, and start over
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Eraser
+                        Button(
+                            onClick = {
+                                isEraser = !isEraser
+                                isEyeDropper = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text(
+                                text = if (isEraser) "Eraser ON" else "Eraser",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ThemeColors.TextWhite
+                            )
+                        }
+
+                        // Fill
+                        Button(
+                            onClick = {
+                                actionHistory.add(
+                                    CanvasAction.FillCanvas(
+                                        previousBackgroundColor = canvasBackgroundColor,
+                                        previousStrokes = strokes.toList(),
+                                        newBackgroundColor = selectedColor
+                                    )
+                                )
+                                canvasBackgroundColor = selectedColor
+                                strokes.clear()
+                                isEraser = false
+                                isEyeDropper = false
+                                syncDrawerStateToRealtimeDatabase()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("Fill", style = MaterialTheme.typography.labelSmall, color = ThemeColors.TextWhite)
+                        }
+
+                        // Eye dropper
+                        Button(
+                            onClick = {
+                                isEyeDropper = !isEyeDropper
+                                isEraser = false
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text(
+                                text = if (isEyeDropper) "Picker ON" else "Eye Dropper",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = ThemeColors.TextWhite
+                            )
+                        }
+
+                        // Undo
+                        Button(
+                            onClick = {
+                                if (actionHistory.isNotEmpty()) {
+                                    when (val lastAction = actionHistory.removeAt(actionHistory.lastIndex)) {
+                                        is CanvasAction.DrawStroke -> {
+                                            if (strokes.isNotEmpty()) {
+                                                strokes.removeAt(strokes.lastIndex)
+                                            }
+                                        }
+                                        is CanvasAction.FillCanvas -> {
+                                            canvasBackgroundColor = lastAction.previousBackgroundColor
+                                            strokes.clear()
+                                            strokes.addAll(lastAction.previousStrokes)
+                                        }
+                                        is CanvasAction.StartOverCanvas -> {
+                                            canvasBackgroundColor = lastAction.previousBackgroundColor
+                                            strokes.clear()
+                                            strokes.addAll(lastAction.previousStrokes)
                                         }
                                     }
-                                    is CanvasAction.FillCanvas -> {
-                                        canvasBackgroundColor = lastAction.previousBackgroundColor
-                                        strokes.clear()
-                                        strokes.addAll(lastAction.previousStrokes)
-                                    }
-                                    is CanvasAction.StartOverCanvas -> {
-                                        canvasBackgroundColor = lastAction.previousBackgroundColor
-                                        strokes.clear()
-                                        strokes.addAll(lastAction.previousStrokes)
-                                    }
+                                    syncDrawerStateToRealtimeDatabase()
                                 }
-                                syncDrawerStateToRealtimeDatabase()
-                            }
-                        },
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text("Undo", style = MaterialTheme.typography.labelSmall)
-                    }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("Undo", style = MaterialTheme.typography.labelSmall, color = ThemeColors.TextWhite)
+                        }
 
-                    // Start Over
-                    OutlinedButton(
-                        onClick = {
-                            actionHistory.add(
-                                CanvasAction.StartOverCanvas(
-                                    previousBackgroundColor = canvasBackgroundColor,
-                                    previousStrokes = strokes.toList()
+                        // Start over
+                        Button(
+                            onClick = {
+                                actionHistory.add(
+                                    CanvasAction.StartOverCanvas(
+                                        previousBackgroundColor = canvasBackgroundColor,
+                                        previousStrokes = strokes.toList()
+                                    )
                                 )
-                            )
-                            strokes.clear()
-                            canvasBackgroundColor = Color.White
-                            isEraser = false
-                            isEyeDropper = false
-                            syncDrawerStateToRealtimeDatabase()
-                        },
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                        modifier = Modifier.height(34.dp)
-                    ) {
-                        Text("Start Over", style = MaterialTheme.typography.labelSmall)
+                                strokes.clear()
+                                canvasBackgroundColor = Color.White
+                                isEraser = false
+                                isEyeDropper = false
+                                syncDrawerStateToRealtimeDatabase()
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("Start Over", style = MaterialTheme.typography.labelSmall, color = ThemeColors.TextWhite)
+                        }
                     }
                 }
-            }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = guessInput,
-                    onValueChange = { guessInput = it },
-                    label = { Text("Type your guess...") },
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        if (guessInput.isNotBlank()) {
-                            val trimmedGuess = guessInput.trim()
-                            if (WordBankRepository.isCorrectGuess(selectedWord, trimmedGuess)) {
-                                if (!correctGuessers.contains(username)) {
-                                    correctGuessers.add(username)
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = guessInput,
+                        onValueChange = { guessInput = it },
+                        placeholder = { Text("Type your guess...", color = Color.Gray) },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedContainerColor = Color.White,
+                            unfocusedContainerColor = Color.White,
+                            focusedTextColor = Color.Black,
+                            unfocusedTextColor = Color.Black
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Button(
+                        onClick = {
+                            if (guessInput.isNotBlank()) {
+                                val trimmedGuess = guessInput.trim()
+                                val myUid = LobbySessionManager.getCurrentUid()
 
-                                    // Calculate time fraction and points
+                                // Check if guess is correct immediately to prevent flashing the text in text box
+                                val isCorrect = WordBankRepository.isCorrectGuess(selectedWord, trimmedGuess)
+                                if (isCorrect) {
+                                    correctGuessers.add(username)
+                                    activeGuesses.remove(username)
+
                                     val timeFraction = timeLeft.toFloat() / timePerRoundSeconds.toFloat()
                                     val guesserPoints = when {
                                         timeFraction > (2f / 3f) -> 3
@@ -619,84 +752,136 @@ fun GameScreen(
                                         else -> 1
                                     }
 
-                                    // Determine current drawer name
-                                    val drawerName = if (players.isNotEmpty()) {
-                                        val drawerIndex = (currentRound - 1) % players.size
-                                        players.getOrNull(drawerIndex)?.name ?: players.first().name
-                                    } else {
-                                        "Drawer"
-                                    }
-
-                                    if (code.isNotBlank()) {
-                                        LobbySessionManager.awardPoints(
-                                            code = code,
-                                            guesserName = username,
-                                            drawerName = drawerName,
-                                            guesserPoints = guesserPoints
-                                        )
-                                    }
+                                    val drawerUid = currentLobby?.currentDrawerUid ?: ""
+                                    LobbySessionManager.awardPoints(
+                                        code = sessionCode,
+                                        currentRound = currentRound,
+                                        guesserUid = myUid,
+                                        drawerUid = drawerUid,
+                                        guesserPoints = guesserPoints
+                                    )
+                                } else {
+                                    activeGuesses[username] = trimmedGuess
                                 }
-                            } else {
-                                activeGuesses[username] = trimmedGuess
+
+                                if (sessionCode.isNotBlank() && sessionCode != "DEFAULT") {
+                                    LobbySessionManager.submitGuess(
+                                        code = sessionCode,
+                                        currentRound = currentRound,
+                                        guesserUid = myUid,
+                                        guesserName = username,
+                                        guessText = trimmedGuess
+                                    )
+                                }
+                                guessInput = ""
                             }
-                            guessInput = ""
-                        }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.height(52.dp)
+                    ) {
+                        Text("Guess", color = ThemeColors.TextWhite, style = MaterialTheme.typography.titleMedium)
                     }
-                ) {
-                    Text("Guess")
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
-
-        // Simulate Round End Button
-        Button(
-            onClick = {
-                timeLeft = 1
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Simulate Round End")
-        }
-    }
-
-    // 10-second word prompt selection dialog for drawer
-    if (isSelectingWord && isDrawer) {
-        AlertDialog(
-            onDismissRequest = { /* Require choosing or waiting for timeout */ },
-            title = {
-                Text(
-                    text = "Choose a Word to Draw ($selectionTimeLeft s)",
-                    style = MaterialTheme.typography.titleMedium
-                )
-            },
-            text = {
+        // Full screen round intro overlay
+        if (isShowingRoundIntro) {
+            Surface(
+                modifier = Modifier.fillMaxSize(),
+                color = ThemeColors.PageBackgroundOrange
+            ) {
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = "Pick a word from the '$theme' theme:",
-                        style = MaterialTheme.typography.bodyMedium
+                        text = "Round $currentRound / $totalRounds",
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = ThemeColors.TextWhite,
+                        textAlign = TextAlign.Center
                     )
-                    wordChoices.forEach { word ->
-                        Button(
-                            onClick = {
-                                selectedWord = word
-                                isSelectingWord = false
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(48.dp)
-                        ) {
-                            Text(word, style = MaterialTheme.typography.titleMedium)
-                        }
+
+                    Spacer(modifier = Modifier.height(32.dp))
+
+                    Text(
+                        text = "The Drawer is...",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = ThemeColors.TextWhite,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    if (revealDrawerName) {
+                        Text(
+                            text = currentDrawerName,
+                            style = MaterialTheme.typography.displayMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.Yellow,
+                            textAlign = TextAlign.Center
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(36.dp),
+                            color = ThemeColors.TextWhite,
+                            strokeWidth = 3.dp
+                        )
                     }
                 }
-            },
-            confirmButton = {}
-        )
+            }
+        }
+
+        // Word prompt selection dialog for drawer
+        if (!isShowingRoundIntro && isSelectingWord && isDrawer) {
+            AlertDialog(
+                onDismissRequest = { }, // Require choosing or waiting for timeout
+                containerColor = ThemeColors.PageBackgroundOrange,
+                title = {
+                    Text(
+                        text = "Choose a Word to Draw ($selectionTimeLeft s)",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = ThemeColors.TextWhite
+                    )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Text(
+                            text = "Pick a word from the '$theme' theme:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = ThemeColors.TextWhite
+                        )
+                        wordChoices.forEach { word ->
+                            Button(
+                                onClick = {
+                                    selectedWord = word
+                                    isSelectingWord = false
+                                    if (sessionCode.isNotBlank() && sessionCode != "DEFAULT") {
+                                        LobbySessionManager.onWordChosen(sessionCode)
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = ThemeColors.PrimaryPurple),
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(48.dp)
+                            ) {
+                                Text(word, style = MaterialTheme.typography.titleMedium, color = ThemeColors.TextWhite)
+                            }
+                        }
+                    }
+                },
+                confirmButton = {}
+            )
+        }
     }
 }
 
@@ -705,7 +890,7 @@ fun GameScreen(
 fun PlayersDisplayArea(
     players: List<Player>,
     localUsername: String,
-    isLocalDrawer: Boolean,
+    currentDrawerUid: String,
     activeGuesses: MutableMap<String, String>,
     correctGuessers: Set<String>,
     modifier: Modifier = Modifier
@@ -716,8 +901,8 @@ fun PlayersDisplayArea(
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        colors = CardDefaults.cardColors(containerColor = ThemeColors.DarkOrangeHeader),
+        border = BorderStroke(1.5.dp, ThemeColors.LightPurpleBorder)
     ) {
         Box(
             modifier = Modifier
@@ -726,7 +911,7 @@ fun PlayersDisplayArea(
             contentAlignment = Alignment.Center
         ) {
             if (totalPlayers.size <= 4) {
-                // Single row, centered
+                // Single row centered
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
@@ -734,10 +919,11 @@ fun PlayersDisplayArea(
                 ) {
                     totalPlayers.forEachIndexed { index, player ->
                         if (index > 0) Spacer(modifier = Modifier.width(12.dp))
+                        val isPlayerDrawer = (player.id.isNotBlank() && player.id == currentDrawerUid)
                         PlayerItem(
                             player = player,
                             isLocalPlayer = player.name.equals(localUsername, ignoreCase = true),
-                            isDrawer = if (player.name.equals(localUsername, ignoreCase = true)) isLocalDrawer else (index == 0 && !isLocalDrawer),
+                            isDrawer = isPlayerDrawer,
                             activeGuess = activeGuesses[player.name],
                             hasGuessedCorrectly = correctGuessers.contains(player.name),
                             onGuessExpire = { activeGuesses.remove(player.name) }
@@ -745,7 +931,7 @@ fun PlayersDisplayArea(
                     }
                 }
             } else {
-                // Two rows, centered
+                // Two rows centered
                 val row1 = totalPlayers.take(4)
                 val row2 = totalPlayers.drop(4)
 
@@ -761,10 +947,11 @@ fun PlayersDisplayArea(
                     ) {
                         row1.forEachIndexed { index, player ->
                             if (index > 0) Spacer(modifier = Modifier.width(12.dp))
+                            val isPlayerDrawer = (player.id.isNotBlank() && player.id == currentDrawerUid)
                             PlayerItem(
                                 player = player,
                                 isLocalPlayer = player.name.equals(localUsername, ignoreCase = true),
-                                isDrawer = if (player.name.equals(localUsername, ignoreCase = true)) isLocalDrawer else false,
+                                isDrawer = isPlayerDrawer,
                                 activeGuess = activeGuesses[player.name],
                                 hasGuessedCorrectly = correctGuessers.contains(player.name),
                                 onGuessExpire = { activeGuesses.remove(player.name) }
@@ -778,10 +965,11 @@ fun PlayersDisplayArea(
                     ) {
                         row2.forEachIndexed { index, player ->
                             if (index > 0) Spacer(modifier = Modifier.width(12.dp))
+                            val isPlayerDrawer = (player.id.isNotBlank() && player.id == currentDrawerUid)
                             PlayerItem(
                                 player = player,
                                 isLocalPlayer = player.name.equals(localUsername, ignoreCase = true),
-                                isDrawer = if (player.name.equals(localUsername, ignoreCase = true)) isLocalDrawer else false,
+                                isDrawer = isPlayerDrawer,
                                 activeGuess = activeGuesses[player.name],
                                 hasGuessedCorrectly = correctGuessers.contains(player.name),
                                 onGuessExpire = { activeGuesses.remove(player.name) }
@@ -794,7 +982,7 @@ fun PlayersDisplayArea(
     }
 }
 
-// Individual player display (avatar circle, username, and drawer tag/3-sec guess box)
+// Individual player display item with avatar circle, username, and drawer badge, green correct box, or guess box
 @Composable
 fun PlayerItem(
     player: Player,
@@ -804,7 +992,7 @@ fun PlayerItem(
     hasGuessedCorrectly: Boolean,
     onGuessExpire: () -> Unit
 ) {
-    // 3-second guess expiration timer
+    // Guess expiration timer for incorrect guesses
     LaunchedEffect(activeGuess) {
         if (!activeGuess.isNullOrEmpty() && !hasGuessedCorrectly) {
             delay(3000L)
@@ -812,24 +1000,28 @@ fun PlayerItem(
         }
     }
 
+    val playerGuessedCorrectly = hasGuessedCorrectly && !isDrawer
+    val avatarBgColor = if (playerGuessedCorrectly) ThemeColors.CorrectPaleGreen else Color.White
+    val avatarBorderColor = if (playerGuessedCorrectly) ThemeColors.CorrectBorderGreen else ThemeColors.LightPurpleBorder
+
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
         modifier = Modifier.width(72.dp)
     ) {
-        // Gray circle placeholder for avatar (or green circle if they guessed the word)
+        // Avatar circle
         Box(
             modifier = Modifier
                 .size(34.dp)
                 .clip(CircleShape)
-                .background(if (hasGuessedCorrectly) Color(0xFF4CAF50) else Color.LightGray),
+                .background(avatarBgColor)
+                .border(1.dp, avatarBorderColor, CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = player.name.take(1).uppercase(),
-                style = MaterialTheme.typography.titleSmall,
-                color = if (hasGuessedCorrectly) Color.White else Color.DarkGray,
-                fontWeight = FontWeight.Bold
+            Image(
+                painter = painterResource(id = getAvatarDrawableResId(player.avatarId)),
+                contentDescription = "Avatar ${player.avatarId}",
+                modifier = Modifier.size(24.dp)
             )
         }
 
@@ -839,6 +1031,7 @@ fun PlayerItem(
         Text(
             text = player.name,
             style = MaterialTheme.typography.labelMedium,
+            color = ThemeColors.TextWhite,
             maxLines = 1,
             fontWeight = if (isLocalPlayer) FontWeight.Bold else FontWeight.Normal
         )
@@ -850,19 +1043,19 @@ fun PlayerItem(
             Text(
                 text = "DRAWER",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary,
+                color = Color.Yellow,
                 fontWeight = FontWeight.Bold
             )
         } else {
             val boxColor = when {
-                hasGuessedCorrectly -> Color(0xFF4CAF50)
-                !activeGuess.isNullOrEmpty() -> MaterialTheme.colorScheme.primaryContainer
-                else -> MaterialTheme.colorScheme.surface
+                playerGuessedCorrectly -> Color(0xFF4CAF50)
+                !activeGuess.isNullOrEmpty() -> Color.White
+                else -> Color.White
             }
             val borderStyle = when {
-                hasGuessedCorrectly -> BorderStroke(1.dp, Color(0xFF2E7D32))
-                !activeGuess.isNullOrEmpty() -> BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
-                else -> BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.5f))
+                playerGuessedCorrectly -> BorderStroke(1.dp, Color(0xFF2E7D32))
+                !activeGuess.isNullOrEmpty() -> BorderStroke(1.dp, ThemeColors.PrimaryPurple)
+                else -> BorderStroke(1.dp, Color.LightGray)
             }
 
             Surface(
@@ -879,11 +1072,11 @@ fun PlayerItem(
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
-                        text = if (hasGuessedCorrectly) "✓ Correct!" else (activeGuess ?: ""),
+                        text = if (playerGuessedCorrectly) "✓ Correct!" else (activeGuess ?: ""),
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (hasGuessedCorrectly) Color.White else MaterialTheme.colorScheme.onSurface,
+                        color = if (playerGuessedCorrectly) Color.White else Color.Black,
                         maxLines = 1,
-                        fontWeight = if (hasGuessedCorrectly) FontWeight.Bold else FontWeight.Normal
+                        fontWeight = if (playerGuessedCorrectly) FontWeight.Bold else FontWeight.Normal
                     )
                 }
             }
@@ -914,7 +1107,7 @@ fun VerticalStrokeSlider(
                 modifier = Modifier
                     .size(strokeWidth.dp.coerceIn(4.dp, 24.dp))
                     .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
+                    .background(ThemeColors.TextWhite)
             )
         }
 
@@ -926,7 +1119,7 @@ fun VerticalStrokeSlider(
                 .width(26.dp)
                 .height(80.dp)
                 .clip(RoundedCornerShape(13.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .background(Color.White.copy(alpha = 0.3f))
                 .pointerInput(Unit) {
                     val updateSize: (Offset) -> Unit = { offset ->
                         val h = size.height.toFloat()
@@ -957,13 +1150,13 @@ fun VerticalStrokeSlider(
                     .fillMaxWidth()
                     .fillMaxHeight(fraction)
                     .clip(RoundedCornerShape(13.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.7f))
+                    .background(ThemeColors.TextWhite)
             )
         }
     }
 }
 
-// Circular RGB color wheel, vertical hue slider, and current color display
+// Circular RGB color wheel paired with a vertical hue value brightness slider and a current color rectangle displayed directly below
 @Composable
 fun RgbColorPickerWithSlider(
     baseColor: Color,
@@ -1039,7 +1232,7 @@ fun RgbColorPickerWithSlider(
                 }
             }
 
-            // Vertical hue slider
+            // Vertical value brightness slider bar
             Box(
                 modifier = Modifier
                     .width(18.dp)
@@ -1086,19 +1279,19 @@ fun RgbColorPickerWithSlider(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // Current color display
+        // Current color rectangle directly below wheel
         Box(
             modifier = Modifier
                 .width(104.dp)
                 .height(18.dp)
                 .clip(RoundedCornerShape(4.dp))
                 .background(selectedColor)
-                .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(4.dp))
+                .border(1.dp, ThemeColors.TextWhite, RoundedCornerShape(4.dp))
         )
     }
 }
 
-// Computes color with hue adjustment (0.0 = Black, 0.5 = Base Color, and 1.0 = White)
+// Computes color with brightness value adjustment
 private fun computeColor(baseColor: Color, brightness: Float): Color {
     val b = brightness.coerceIn(0f, 1f)
     return if (b < 0.5f) {
